@@ -8,7 +8,7 @@ instantiating a client object to access the root of the REST hierarchy,
 providing it the base URL, user name and password (for Basic Auth).
 
     >>> from mailmanclient import Client
-    >>> client = Client('http://localhost:9001/3.0', 'restadmin', 'restpass')
+    >>> client = Client('http://localhost:9001/3.1', 'restadmin', 'restpass')
 
 .. note::
     Please note that port '9001' is used above, since mailman's test server
@@ -18,10 +18,11 @@ providing it the base URL, user name and password (for Basic Auth).
 We can retrieve basic information about the server.
 
     >>> dump(client.system)
+    api_version: 3.1
     http_etag: "..."
-    mailman_version: GNU Mailman 3.0... (...)
+    mailman_version: GNU Mailman 3.1... (...)
     python_version: ...
-    self_link: http://localhost:9001/3.0/system/versions
+    self_link: http://localhost:9001/3.1/system/versions
 
 To start with, there are no known mailing lists.
 
@@ -138,6 +139,8 @@ List results can be retrieved as pages:
     1
     >>> len(page)
     2
+    >>> page.total_size
+    4
     >>> for m_list in page:
     ...     print(m_list)
     <List "test-one@example.com">
@@ -267,6 +270,8 @@ Membership lists can be paginated, to recieve only a part of the result.
     >>> page = client.get_member_page(count=2, page=1)
     >>> page.nr
     1
+    >>> page.total_size
+    4
     >>> for member in page:
     ...     print(member)
     <Member "anna@example.com" on "test-one.example.com">
@@ -283,11 +288,15 @@ Membership lists can be paginated, to recieve only a part of the result.
     >>> page = test_one.get_member_page(count=1, page=1)
     >>> page.nr
     1
+    >>> page.total_size
+    2
     >>> for member in page:
     ...     print(member)
     <Member "anna@example.com" on "test-one.example.com">
     >>> page = page.next
     >>> page.nr
+    2
+    >>> page.total_size
     2
     >>> for member in page:
     ...     print(member)
@@ -402,6 +411,8 @@ The list of users can also be paginated:
     >>> page = client.get_user_page(count=4, page=1)
     >>> page.nr
     1
+    >>> page.total_size
+    5
 
     >>> for user in page:
     ...     print(user)
@@ -450,6 +461,7 @@ Every user has a list of one or more addresses.
 Multiple addresses can be assigned to a user record:
 
     >>> cris.add_address('cris.person@example.org')
+    cris.person@example.org
     >>> print(client.get_address('cris.person@example.org'))
     cris.person@example.org
 
@@ -740,8 +752,7 @@ discarded using the request token.
 
 Let's accept Groucho:
 
-    >>> confirm_first.manage_request(request_1['token'], 'accept')
-
+    >>> response = confirm_first.moderate_request(request_1['token'], 'accept')
     >>> len(confirm_first.requests)
     2
 
@@ -755,14 +766,13 @@ Let's accept Groucho:
 
 Let's reject Harpo:
 
-    >>> confirm_first.manage_request(request_2['token'], 'reject')
-    
+    >>> response = confirm_first.moderate_request(request_2['token'], 'reject')
     >>> len(confirm_first.requests)
     1
 
 Let's discard Zeppo's request:
 
-    >>> confirm_first.manage_request(request_3['token'], 'discard')
+    >>> response = confirm_first.moderate_request(request_3['token'], 'discard')
     >>> len(confirm_first.requests)
     0
 
@@ -840,7 +850,7 @@ key in a dictionary.
     ...     print('{0}: {1}'.format(archiver, archivers[archiver]))
     mail-archive: True
     mhonarc: True
-    prototype: False
+    prototype: True
 
     >>> archivers['mail-archive']
     True
