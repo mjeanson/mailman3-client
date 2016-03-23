@@ -27,6 +27,7 @@ __all__ = [
 
 import six
 import json
+import warnings
 
 from base64 import b64encode
 from httplib2 import Http
@@ -157,7 +158,7 @@ class Client:
         response, content = self._connection.call('lists')
         if 'entries' not in content:
             return []
-        return [_List(self._connection, entry['self_link'])
+        return [_List(self._connection, entry['self_link'], entry)
                 for entry in content['entries']]
 
     def get_list_page(self, count=50, page=1):
@@ -177,7 +178,7 @@ class Client:
         response, content = self._connection.call('members')
         if 'entries' not in content:
             return []
-        return [_Member(self._connection, entry['self_link'])
+        return [_Member(self._connection, entry['self_link'], entry)
                 for entry in content['entries']]
 
     def get_member(self, fqdn_listname, subscriber_address):
@@ -191,7 +192,7 @@ class Client:
         response, content = self._connection.call('users')
         if 'entries' not in content:
             return []
-        return [_User(self._connection, entry['self_link'])
+        return [_User(self._connection, entry['self_link'], entry)
                 for entry in sorted(content['entries'],
                                     key=itemgetter('self_link'))]
 
@@ -239,7 +240,7 @@ class Client:
     def get_user(self, address):
         response, content = self._connection.call(
             'users/{0}'.format(address))
-        return _User(self._connection, content['self_link'])
+        return _User(self._connection, content['self_link'], content)
 
     def get_address(self, address):
         response, content = self._connection.call(
@@ -308,7 +309,7 @@ class _Domain:
             'domains/{0}/lists'.format(self.mail_host))
         if 'entries' not in content:
             return []
-        return [_List(self._connection, entry['self_link'])
+        return [_List(self._connection, entry['self_link'], entry)
                 for entry in sorted(content['entries'],
                                     key=itemgetter('fqdn_listname'))]
 
@@ -340,6 +341,7 @@ class _List:
         self._connection = connection
         self._url = url
         self._info = data
+        self._settings = None
 
     def __repr__(self):
         return '<List "{0}">'.format(self.fqdn_listname)
@@ -398,7 +400,7 @@ class _List:
         response, content = self._connection.call(url)
         if 'entries' not in content:
             return []
-        return [_Member(self._connection, entry['self_link'])
+        return [_Member(self._connection, entry['self_link'], entry)
                 for entry in sorted(content['entries'],
                                     key=itemgetter('address'))]
 
@@ -410,7 +412,7 @@ class _List:
         response, content = self._connection.call(url, data)
         if 'entries' not in content:
             return []
-        return [_Member(self._connection, entry['self_link'])
+        return [_Member(self._connection, entry['self_link'], entry)
                 for entry in sorted(content['entries'],
                                     key=itemgetter('address'))]
 
@@ -420,8 +422,10 @@ class _List:
 
     @property
     def settings(self):
-        return _Settings(self._connection,
-                         'lists/{0}/config'.format(self.fqdn_listname))
+        if self._settings is None:
+            self._settings = _Settings(self._connection,
+                'lists/{0}/config'.format(self.fqdn_listname))
+        return self._settings
 
     @property
     def held(self):
@@ -436,6 +440,7 @@ class _List:
                 msg = dict(hold_date=entry['hold_date'],
                            msg=entry['msg'],
                            reason=entry['reason'],
+                           moderation_reasons=entry['moderation_reasons'],
                            sender=entry['sender'],
                            request_id=entry['request_id'],
                            subject=entry['subject'])
@@ -459,14 +464,6 @@ class _List:
                                request_date=entry['when'])
                 entries.append(request)
         return entries
-
-    def manage_request(self, token, action):
-        """
-        accept|reject|discard|defer a subscription request.
-        """
-        response, content = self._connection.call(
-            'lists/{0}/requests/{1}'.format(self.list_id, token),
-            {'action': action})
 
     @property
     def archivers(self):
@@ -539,6 +536,13 @@ class _List:
         response, content = self._connection.call(path, {'action': action})
         return response
 
+    def manage_request(self, token, action):
+        """Alias for moderate_request, kept for compatibility"""
+        warnings.warn('The `manage_request()` method has been replaced by '
+                      '`moderate_request()` and will be removed in the future.',
+                      DeprecationWarning, stacklevel=2)
+        return self.moderate_request(token, action)
+
     def accept_request(self, request_id):
         """Shortcut to accept a subscription request."""
         return self.moderate_request(request_id, 'accept')
@@ -561,12 +565,14 @@ class _List:
         :param address: The email address of the member for this list.
         :return: A member proxy object.
         """
-        # In order to get the member object we need to
-        # iterate over the existing member list
-        for member in self.members:
-            if member.email == email:
-                return member
-        else:
+        # In order to get the member object we query the REST API for
+        # the member. Incase there is no matching subscription, an
+        # HTTPError is returned instead.
+        try:
+            path = 'lists/{0}/member/{1}'.format(self.list_id, email)
+            response, content = self._connection.call(path)
+            return _Member(self._connection, content['self_link'], content)
+        except HTTPError:
             raise ValueError('%s is not a member address of %s' %
                              (email, self.fqdn_listname))
 
@@ -614,11 +620,11 @@ class _List:
         # In order to get the member object we need to
         # iterate over the existing member list
 
-        for member in self.members:
-            if member.email == email:
-                self._connection.call(member.self_link, method='DELETE')
-                break
-        else:
+        try:
+            path = 'lists/{0}/member/{1}'.format(self.list_id, email)
+            self._connection.call(path, method='DELETE')
+        except HTTPError:
+            # The member link does not exist, i.e. he is not a member
             raise ValueError('%s is not a member address of %s' %
                              (email, self.fqdn_listname))
 
@@ -685,10 +691,10 @@ class _ListArchivers:
 
 class _Member:
 
-    def __init__(self, connection, url):
+    def __init__(self, connection, url, data=None):
         self._connection = connection
         self._url = url
-        self._info = None
+        self._info = data
         self._preferences = None
 
     def __repr__(self):
@@ -746,11 +752,10 @@ class _Member:
 
 class _User:
 
-    def __init__(self, connection, url):
+    def __init__(self, connection, url, data=None):
         self._connection = connection
         self._url = url
-        self._info = None
-        self._addresses = None
+        self._info = data
         self._subscriptions = None
         self._subscription_list_ids = None
         self._preferences = None
@@ -811,8 +816,8 @@ class _User:
                     'members/find', data={'subscriber': address})
                 try:
                     for entry in content['entries']:
-                        subscriptions.append(_Member(self._connection,
-                                                     entry['self_link']))
+                        subscriptions.append(_Member(
+                            self._connection, entry['self_link'], entry))
                 except KeyError:
                     pass
             self._subscriptions = subscriptions
@@ -838,7 +843,12 @@ class _User:
         # Adds another email adress to the user record and returns an
         # _Address object.
         url = '{0}/addresses'.format(self._url)
-        self._connection.call(url, {'email': email})
+        response, content = self._connection.call(url, {'email': email})
+        address = {
+            'email': email,
+            'self_link': response['location'],
+        }
+        return _Address(self._connection, address)
 
     def save(self):
         data = {'display_name': self.display_name}
@@ -1073,6 +1083,7 @@ class _Page:
         self._page = page
         self._model = model
         self._entries = []
+        self.total_size = 0
         self._create_page()
 
     def __getitem__(self, key):
@@ -1095,9 +1106,11 @@ class _Page:
             self._path, self._count, self._page)
         response, content = self._connection.call(path)
         if 'entries' in content:
+            self.total_size = content["total_size"]
             for entry in content['entries']:
-                self._entries.append(self._model(self._connection,
-                                     entry['self_link']))
+                instance = self._model(
+                    self._connection, entry['self_link'], entry)
+                self._entries.append(instance)
 
     @property
     def nr(self):
@@ -1105,16 +1118,22 @@ class _Page:
 
     @property
     def next(self):
-        self._page += 1
-        self._create_page()
-        return self
+        return _Page(self._connection, self._path, self._model,
+                     self._count, self._page + 1)
 
     @property
     def previous(self):
-        if self._count > 0:
-            self._page -= 1
-            self._create_page()
-            return self
+        if self.has_previous:
+            return _Page(self._connection, self._path, self._model,
+                         self._count, self._page - 1)
+
+    @property
+    def has_previous(self):
+        return self._page > 1
+
+    @property
+    def has_next(self):
+        return self._count * self._page < self.total_size
 
 
 class _Queue:
